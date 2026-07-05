@@ -12,6 +12,9 @@
 DIR=/etc/corplink
 CFG="$DIR/config.json"
 mkdir -p "$DIR"
+# config.json holds the password and corplink-rs drops session cookies here too;
+# keep the whole dir root-only.
+chmod 700 "$DIR"
 
 # uci getters: u=raw, udef=with default, ubool=1/0 as JSON boolean input
 u()    { uci -q get "corplink.main.$1"; }
@@ -22,7 +25,9 @@ uarr() { # $1 = uci option / json key
 	local vals v; vals="$(uci -q get "corplink.main.$1")"
 	[ -n "$vals" ] || return 0
 	json_add_array "$1"
-	for v in $vals; do json_add_string "" "$v"; done
+	set -f  # values are unquoted for word-splitting; disable globbing so a stray
+	for v in $vals; do json_add_string "" "$v"; done  # '*' can't expand to files
+	set +f
 	json_close_array
 }
 
