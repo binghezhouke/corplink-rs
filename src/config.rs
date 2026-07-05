@@ -95,6 +95,37 @@ pub struct Config {
     /// head-of-line blocking), forcing "udp" can be far faster there. Leave unset to keep the
     /// default (follow server `protocol_mode`: 1 => tcp, otherwise udp).
     pub force_protocol: Option<String>,
+    /// Skip the pre-connect gateway ping. Gateway selection normally requires a
+    /// successful HTTPS ping to the gateway's `api_port`; some networks firewall
+    /// that api port even though the WireGuard transport port itself is reachable,
+    /// which makes selection fail with "no vpn available" despite a usable tunnel.
+    /// When true, the ping is skipped and the first gateway (after `vpn_server_name`
+    /// filtering) is used directly. Best combined with an explicit `vpn_server_name`.
+    pub skip_ping: Option<bool>,
+    /// Override the gateway endpoint IP returned by `/api/vpn/list`. The portal load-
+    /// balances a gateway across several public IPs and picks one based on the client's
+    /// apparent source; that IP can be firewalled from the current host even though a
+    /// different IP of the *same* gateway is directly reachable. When set, this IP is used
+    /// for both the ConnectVPN/keepalive API calls (on `api_port`) and the WireGuard peer
+    /// endpoint (on `vpn_port`), while the ports come from the selected `/api/vpn/list`
+    /// entry. Pair with `vpn_server_name` (to pick the gateway) and, on UDP-blocked
+    /// networks, `force_protocol: "tcp"`. Leave unset to use the server-provided IP.
+    pub vpn_server_ip: Option<String>,
+    /// Replace the system routes installed for the tunnel with this custom list,
+    /// decoupling them from the WireGuard AllowedIPs. Only affects the OS routing
+    /// table (and netstack accept-list), NOT the AllowedIPs sent to wg. Intended
+    /// pairing: `route_mode: "full"` so AllowedIPs becomes 0.0.0.0/0 (wg accepts all
+    /// traffic and drops nothing), then this list narrows what the OS actually sends
+    /// into the interface. The peer endpoint and `vpn_disallowed_routes` are still
+    /// carved out of this list to avoid routing loops. Ignored when empty or when
+    /// `auto_setup_routes` is false (which installs no routes at all).
+    pub vpn_route_override: Option<Vec<String>>,
+    /// Default log verbosity when the `RUST_LOG` env var is not set. Accepts any
+    /// env_logger filter string, e.g. "info" (default), "debug", "warn", or a
+    /// per-module directive like "corplink_rs=debug". `RUST_LOG`, when present,
+    /// always takes precedence over this value. Bump to "debug" to surface the
+    /// verbose diagnostics (cookies, tokens, keep-alive) that are hidden by default.
+    pub log_level: Option<String>,
 }
 
 impl fmt::Display for Config {

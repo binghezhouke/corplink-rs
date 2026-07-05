@@ -212,7 +212,7 @@ impl Client {
 
         for (name, _) in resp.headers() {
             if name.as_str().eq_ignore_ascii_case("set-cookie") {
-                log::info!("found set-cookie in header, saving cookie");
+                log::debug!("found set-cookie in header, saving cookie");
                 self.save_cookie()?;
                 break;
             }
@@ -309,7 +309,7 @@ impl Client {
         url: &String,
         token: &String,
     ) -> Result<String> {
-        log::info!("old token is: {token}");
+        log::debug!("old token is: {token}");
         log::info!("please scan the QR code or visit the following link to auth corplink:\n{url}");
         match TerminalQrCode::from_bytes(url.as_bytes()) {
             Ok(qr) => qr.print(),
@@ -476,7 +476,7 @@ impl Client {
                         let url = Url::parse(&otp_uri).context("failed to parse otp uri")?;
                         for (k, v) in url.query_pairs() {
                             if k == "secret" {
-                                log::info!("got 2fa token: {}", &v);
+                                log::debug!("got 2fa token: {}", &v);
                                 self.conf.code = Some(v.to_string());
                                 self.conf.save().await?;
                                 break;
@@ -529,7 +529,7 @@ impl Client {
             let url = Url::parse(&otp_uri).context("failed to parse otp uri")?;
             for (k, v) in url.query_pairs() {
                 if k == "secret" {
-                    log::info!("got 2fa token: {}", &v);
+                    log::debug!("got 2fa token: {}", &v);
                     self.conf.code = Some(v.to_string());
                     self.conf.save().await?;
                     break;
@@ -742,8 +742,11 @@ impl Client {
         None
     }
 
-    // ping vpn and return latency in ms. Will return Err on error
-    async fn ping_vpn(&mut self, ip: String, api_port: u16) -> Result<i64> {
+    // Point vpn_param.url at a specific gateway (ip:api_port) and copy the
+    // session cookies onto that host, so vpn/* requests (ping, connect, keepalive,
+    // disconnect) target the gateway instead of the main portal. ping_vpn and the
+    // skip_ping selection path both rely on this being set before ConnectVPN.
+    fn set_vpn_url(&mut self, ip: &str, api_port: u16) -> Result<()> {
         {
             // config cookie
             let mut cookie = self
@@ -764,13 +767,13 @@ impl Client {
                     cookies.push(c.clone());
                 }
             }
-            url.set_host(Some(ip.as_str()))
+            url.set_host(Some(ip))
                 .context("failed to set ping host")?;
             url.set_port(Some(api_port))
                 .or_else(|_| bail!("failed to set ping port"))?;
             for c in cookies {
                 let mut c = cookie::Cookie::new(c.name().to_string(), c.value().to_string());
-                c.set_domain(ip.clone());
+                c.set_domain(ip.to_string());
                 let c = Cookie::try_from_raw_cookie(&c, &url.clone())
                     .context("failed to convert raw cookie")?;
                 cookie
@@ -780,6 +783,12 @@ impl Client {
             self.api_url.vpn_param.url = url.to_string().trim_end_matches('/').to_string();
         }
         self.save_cookie()?;
+        Ok(())
+    }
+
+    // ping vpn and return latency in ms. Will return Err on error
+    async fn ping_vpn(&mut self, ip: String, api_port: u16) -> Result<i64> {
+        self.set_vpn_url(&ip, api_port)?;
         let req_start = Utc::now().timestamp_millis();
         let resp = self.request::<String>(ApiName::PingVPN, None).await?;
         let req_end = Utc::now().timestamp_millis();
@@ -861,7 +870,7 @@ impl Client {
                 ))
                 .collect::<Vec<String>>()
         );
-        let filtered_vpn = vpn_info
+        let filtered_vpn: Vec<RespVpnInfo> = vpn_info
             .into_iter()
             .filter(|vpn| {
                 if let Some(server_name) = self.conf.vpn_server_name.clone() {
@@ -893,24 +902,63 @@ impl Client {
             })
             .collect();
 
-        let vpn = match self.conf.vpn_select_strategy.clone() {
-            Some(strategy) => match strategy.as_str() {
-                STRATEGY_LATENCY => self.get_first_vpn_by_latency(filtered_vpn).await,
-                STRATEGY_DEFAULT => self.get_first_available_vpn(filtered_vpn).await,
-                _ => bail!("unsupported strategy"),
-            },
-            None => self.get_first_available_vpn(filtered_vpn).await,
+        let skip_ping = self.conf.skip_ping.unwrap_or(false);
+        let vpn = if skip_ping {
+            match filtered_vpn.into_iter().next() {
+                Some(vpn) => {
+                    log::info!(
+                        "skip_ping enabled, using gateway {} ({}) without pinging",
+                        vpn.display_name(),
+                        vpn.ip
+                    );
+                    Some(vpn)
+                }
+                None => None,
+            }
+        } else {
+            match self.conf.vpn_select_strategy.clone() {
+                Some(strategy) => match strategy.as_str() {
+                    STRATEGY_LATENCY => self.get_first_vpn_by_latency(filtered_vpn).await,
+                    STRATEGY_DEFAULT => self.get_first_available_vpn(filtered_vpn).await,
+                    _ => bail!("unsupported strategy"),
+                },
+                None => self.get_first_available_vpn(filtered_vpn).await,
+            }
         };
 
         let vpn = match vpn {
             Some(ref vpn) => vpn,
+            None if skip_ping => bail!(
+                "no vpn available: no gateway matched (skip_ping is on, so ping is not the \
+                 cause). check that `vpn_server_name`, if set, matches one of the gateways \
+                 listed above"
+            ),
             None => bail!(
                 "no vpn available: every gateway failed to ping (see 'failed to ping' warnings \
                  above). the ping uses the api port over http; if a gateway you expect is \
-                 reachable, its api port may be blocked from this host/network"
+                 reachable, its api port may be blocked from this host/network. you can set \
+                 \"skip_ping\": true (ideally with \"vpn_server_name\") to bypass this check"
             ),
         };
-        let vpn_addr = format!("{}:{}", vpn.ip, vpn.vpn_port);
+        // Effective gateway IP: an explicit `vpn_server_ip` overrides the server-provided
+        // `vpn.ip` (which the portal load-balances and may hand out an IP that is firewalled
+        // from this host). Always re-point the API url at the chosen gateway here so both the
+        // skip_ping path and the ping path (which leaves the url on the *last* pinged gateway)
+        // target the gateway we actually selected.
+        let gateway_ip = match self.conf.vpn_server_ip.as_deref() {
+            Some(ip) if !ip.is_empty() => {
+                log::info!(
+                    "vpn_server_ip override: using {} instead of server-provided {} for {}",
+                    ip,
+                    vpn.ip,
+                    vpn.display_name()
+                );
+                ip.to_string()
+            }
+            _ => vpn.ip.clone(),
+        };
+        self.set_vpn_url(&gateway_ip, vpn.api_port)?;
+        let vpn_addr = format!("{}:{}", gateway_ip, vpn.vpn_port);
         let chosen_protocol = match self.conf.force_protocol.as_deref() {
             Some(p) if p.eq_ignore_ascii_case("udp") => "udp (forced)",
             Some(p) if p.eq_ignore_ascii_case("tcp") => "tcp (forced)",
@@ -1026,34 +1074,33 @@ impl Client {
         // packets going to the peer itself, producing a routing loop (black hole).
         // Mirrors wg-quick's behavior of excluding the endpoint from routes. No-op
         // when the peer IP isn't covered by any allowed_ip (e.g. split mode).
-        match vpn.ip.parse::<std::net::IpAddr>() {
-            Ok(peer_ip) => {
-                let peer_cidr = match peer_ip {
-                    std::net::IpAddr::V4(_) => format!("{}/32", peer_ip),
-                    std::net::IpAddr::V6(_) => format!("{}/128", peer_ip),
-                };
-                let before = allowed_ips.len();
-                let mut carved = Vec::with_capacity(allowed_ips.len());
-                for a in &allowed_ips {
-                    carved.extend(crate::utils::subtract_cidr_from_cidr(a, &peer_cidr));
-                }
-                if carved.len() != before {
-                    log::info!(
-                        "auto-carved peer endpoint {} out of allowed_ips: {} -> {} entries",
-                        peer_cidr,
-                        before,
-                        carved.len()
-                    );
-                }
-                allowed_ips = carved;
-            }
+        let peer_cidr = match gateway_ip.parse::<std::net::IpAddr>() {
+            Ok(std::net::IpAddr::V4(ip)) => Some(format!("{}/32", ip)),
+            Ok(std::net::IpAddr::V6(ip)) => Some(format!("{}/128", ip)),
             Err(e) => {
                 log::warn!(
-                    "could not parse vpn.ip {:?} as IP, skipping peer-IP carve-out: {}",
-                    vpn.ip,
+                    "could not parse gateway ip {:?} as IP, skipping peer-IP carve-out: {}",
+                    gateway_ip,
                     e
                 );
+                None
             }
+        };
+        if let Some(peer_cidr) = peer_cidr.as_ref() {
+            let before = allowed_ips.len();
+            let mut carved = Vec::with_capacity(allowed_ips.len());
+            for a in &allowed_ips {
+                carved.extend(crate::utils::subtract_cidr_from_cidr(a, peer_cidr));
+            }
+            if carved.len() != before {
+                log::info!(
+                    "auto-carved peer endpoint {} out of allowed_ips: {} -> {} entries",
+                    peer_cidr,
+                    before,
+                    carved.len()
+                );
+            }
+            allowed_ips = carved;
         }
         log::info!(
             "final allowed_ips ({} entries): {:?}",
@@ -1061,11 +1108,46 @@ impl Client {
             allowed_ips
         );
         let auto_setup_routes = self.conf.auto_setup_routes.unwrap_or(true);
-        let routes = if auto_setup_routes {
-            allowed_ips.clone()
-        } else {
+        let routes = if !auto_setup_routes {
             log::info!("auto_setup_routes is disabled, skip setting routes");
             Vec::new()
+        } else if let Some(over) = self
+            .conf
+            .vpn_route_override
+            .as_ref()
+            .filter(|v| !v.is_empty())
+        {
+            // Decouple the installed system routes from the WireGuard AllowedIPs:
+            // install exactly the user's list instead of the server-derived routes.
+            // Still carve vpn_disallowed_routes and the peer endpoint so a broad
+            // entry (e.g. 0.0.0.0/0) can't loop the peer's own packets back into the
+            // tunnel. Typical pairing: route_mode=full -> AllowedIPs 0.0.0.0/0 (wg
+            // accepts everything) while these routes narrow what the OS sends in.
+            let mut r = over.to_vec();
+            if let Some(disallowed) = self.conf.vpn_disallowed_routes.as_ref() {
+                for d in disallowed {
+                    let mut next = Vec::with_capacity(r.len());
+                    for a in &r {
+                        next.extend(crate::utils::subtract_cidr_from_cidr(a, d));
+                    }
+                    r = next;
+                }
+            }
+            if let Some(peer_cidr) = peer_cidr.as_ref() {
+                let mut next = Vec::with_capacity(r.len());
+                for a in &r {
+                    next.extend(crate::utils::subtract_cidr_from_cidr(a, peer_cidr));
+                }
+                r = next;
+            }
+            log::info!(
+                "vpn_route_override: installing {} custom route(s), AllowedIPs left untouched: {:?}",
+                r.len(),
+                r
+            );
+            r
+        } else {
+            allowed_ips.clone()
         };
 
         // corplink config
@@ -1097,7 +1179,7 @@ impl Client {
 
     pub async fn keep_alive_vpn(&mut self, conf: &WgConf, interval: u64) {
         loop {
-            log::info!("keep alive");
+            log::debug!("keep alive");
             match self.report_vpn_status(conf).await {
                 Ok(_) => (),
                 Err(err) => {

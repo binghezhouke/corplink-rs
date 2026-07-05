@@ -68,16 +68,21 @@ async fn main() {
 }
 
 async fn run() -> Result<()> {
-    // NOTE: If you want to debug, you should set `RUST_LOG` env to `debug` and run corplink-rs in root
-    //  because `check_privilege` will call sudo and drop env if you're not root
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-
-    print_version();
-
+    // Load config first so the log level can come from it. NOTE: If you want to
+    // debug, set `log_level` in the config (or `RUST_LOG` env, which takes
+    // precedence) to `debug`, and run corplink-rs as root because
+    // `check_privilege` will call sudo and drop env if you're not root.
     let conf_file = parse_arg();
     let mut conf = Config::from_file(&conf_file)
         .await
         .context("failed to load config")?;
+
+    let default_level = conf.log_level.as_deref().unwrap_or("info");
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_level))
+        .init();
+
+    print_version();
+
     let name = conf
         .interface_name
         .clone()
