@@ -1,0 +1,47 @@
+#!/bin/sh
+# Add/remove an fw4 masquerade zone for the corplink TUN so LAN clients can use
+# the tunnel as a global gateway. The TUN is created by corplink-rs (not netifd),
+# so the zone matches it by device name. Sections we create are tagged with
+# option 'corplink_managed 1' for precise, idempotent removal.
+
+IFACE="$(uci -q get corplink.main.interface_name)"; IFACE="${IFACE:-corplink}"
+MASQ="$(uci -q get corplink.main.masquerade)"
+ZONE=corplink
+
+remove() {
+	local changed=0 sid
+	for sid in $(uci -q show firewall | grep '\.corplink_managed=' | cut -d. -f2); do
+		uci -q delete "firewall.$sid" && changed=1
+	done
+	[ "$changed" = 1 ] && uci -q commit firewall
+	return 0
+}
+
+add() {
+	remove
+	[ "$MASQ" = "1" ] || return 0
+	local z f
+	z="$(uci add firewall zone)"
+	uci -q set "firewall.$z.name=$ZONE"
+	# VPN side is untrusted: silently DROP all inbound + forwarded traffic from the
+	# tunnel. Only LAN-initiated (out via corplink) flows, whose return packets are
+	# accepted by fw4's global established/related rule.
+	uci -q set "firewall.$z.input=DROP"
+	uci -q set "firewall.$z.output=ACCEPT"
+	uci -q set "firewall.$z.forward=DROP"
+	uci -q set "firewall.$z.masq=1"
+	uci -q set "firewall.$z.mtu_fix=1"
+	uci -q add_list "firewall.$z.device=$IFACE"
+	uci -q set "firewall.$z.corplink_managed=1"
+	f="$(uci add firewall forwarding)"
+	uci -q set "firewall.$f.src=lan"
+	uci -q set "firewall.$f.dest=$ZONE"
+	uci -q set "firewall.$f.corplink_managed=1"
+	uci -q commit firewall
+}
+
+case "$1" in
+	add)    add;    fw4 reload >/dev/null 2>&1 ;;
+	remove) remove; fw4 reload >/dev/null 2>&1 ;;
+	*) echo "usage: $0 add|remove" >&2; exit 1 ;;
+esac

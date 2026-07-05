@@ -1,0 +1,51 @@
+#!/bin/sh /etc/rc.common
+# procd service for corplink-rs
+
+USE_PROCD=1
+START=95
+STOP=10
+
+PROG=/usr/bin/corplink-rs
+CONF=/etc/corplink/config.json
+
+start_service() {
+	local enabled
+	config_load corplink
+	config_get_bool enabled main enabled 0
+	[ "$enabled" = "1" ] || {
+		echo "corplink: disabled in /etc/config/corplink (option enabled)" >&2
+		return 0
+	}
+
+	# regenerate config.json from UCI (preserving keys/state) and set up NAT
+	/usr/libexec/corplink-genconfig
+	/usr/libexec/corplink-firewall add
+
+	procd_open_instance
+	procd_set_param command "$PROG" "$CONF"
+	# cookies are written next to the config file (/etc/corplink), so no cwd needed
+	# respawn with a 30s gap (not the default 5s) so a wrong password / transient
+	# failure doesn't hammer the portal and risk locking the account; give up after
+	# 5 failures within an hour until the next manual/enable restart.
+	procd_set_param respawn 3600 30 5
+	# stream env_logger output to logd so it shows up in `logread -e corplink`
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_set_param pidfile /var/run/corplink.pid
+	procd_close_instance
+}
+
+stop_service() {
+	# procd sends SIGTERM -> corplink-rs disconnects + logs out gracefully
+	/usr/libexec/corplink-firewall remove
+}
+
+reload_service() {
+	stop
+	start
+}
+
+service_triggers() {
+	# LuCI "Save & Apply" -> commit corplink -> reload this service
+	procd_add_reload_trigger "corplink"
+}

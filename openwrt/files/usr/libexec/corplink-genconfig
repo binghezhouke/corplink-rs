@@ -1,0 +1,71 @@
+#!/bin/sh
+# Generate /etc/corplink/config.json from UCI while PRESERVING the machine-
+# generated fields that corplink-rs writes back into the file (WireGuard keys,
+# device id/name, login state, 2FA code). This lets UCI own the user-facing
+# settings without wiping the tunnel identity / session on every restart.
+#
+# All preserved fields serialize as JSON strings (state -> "Init"/"Login"),
+# so jshn round-trips them faithfully.
+
+. /usr/share/libubox/jshn.sh
+
+DIR=/etc/corplink
+CFG="$DIR/config.json"
+mkdir -p "$DIR"
+
+# uci getters: u=raw, udef=with default, ubool=1/0 as JSON boolean input
+u()    { uci -q get "corplink.main.$1"; }
+udef() { local v; v="$(uci -q get "corplink.main.$1")"; echo "${v:-$2}"; }
+ubool(){ [ "$(uci -q get "corplink.main.$1")" = "1" ] && echo 1 || echo 0; }
+# uci list option -> JSON string array (skipped when the list is empty)
+uarr() { # $1 = uci option / json key
+	local vals v; vals="$(uci -q get "corplink.main.$1")"
+	[ -n "$vals" ] || return 0
+	json_add_array "$1"
+	for v in $vals; do json_add_string "" "$v"; done
+	json_close_array
+}
+
+# --- extract secrets from an existing config.json (if any) ---
+PRIV=; PUB=; DEVID=; DEVNAME=; STATE=; CODE=
+if [ -f "$CFG" ]; then
+	json_init
+	if json_load_file "$CFG" 2>/dev/null; then
+		json_get_var PRIV private_key
+		json_get_var PUB public_key
+		json_get_var DEVID device_id
+		json_get_var DEVNAME device_name
+		json_get_var STATE state
+		json_get_var CODE code
+	fi
+fi
+
+# --- build a fresh config from UCI + preserved secrets ---
+json_init
+json_add_string company_name "$(u company_name)"
+json_add_string username "$(u username)"
+[ -n "$(u password)" ] && json_add_string password "$(u password)"
+json_add_string platform "$(udef platform feilian)"
+[ -n "$(u server)" ] && json_add_string server "$(u server)"
+json_add_string interface_name "$(udef interface_name corplink)"
+json_add_string route_mode "$(udef route_mode full)"
+json_add_string log_level "$(udef log_level info)"
+json_add_boolean use_vpn_dns "$(ubool use_vpn_dns)"
+json_add_boolean skip_ping "$(ubool skip_ping)"
+[ -n "$(u force_protocol)" ]  && json_add_string force_protocol  "$(u force_protocol)"
+[ -n "$(u vpn_server_name)" ] && json_add_string vpn_server_name "$(u vpn_server_name)"
+[ -n "$(u vpn_server_ip)" ]   && json_add_string vpn_server_ip   "$(u vpn_server_ip)"
+# list overrides (CIDR arrays) -- omitted when empty so serde sees None
+uarr vpn_route_override
+uarr vpn_disallowed_routes
+
+# preserved machine-generated fields (only if present)
+[ -n "$PRIV" ]    && json_add_string private_key "$PRIV"
+[ -n "$PUB" ]     && json_add_string public_key  "$PUB"
+[ -n "$DEVID" ]   && json_add_string device_id   "$DEVID"
+[ -n "$DEVNAME" ] && json_add_string device_name "$DEVNAME"
+[ -n "$STATE" ]   && json_add_string state       "$STATE"
+[ -n "$CODE" ]    && json_add_string code        "$CODE"
+
+json_dump > "$CFG"
+chmod 600 "$CFG"

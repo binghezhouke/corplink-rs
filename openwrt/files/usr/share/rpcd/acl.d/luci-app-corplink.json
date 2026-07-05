@@ -1,0 +1,14 @@
+{
+	"luci-app-corplink": {
+		"description": "Grant access to Corplink VPN configuration and log",
+		"read": {
+			"uci": [ "corplink" ],
+			"ubus": { "service": [ "list" ] },
+			"file": { "/sbin/logread": [ "exec" ] }
+		},
+		"write": {
+			"uci": [ "corplink" ],
+			"file": { "/etc/init.d/corplink": [ "exec" ] }
+		}
+	}
+}

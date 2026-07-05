@@ -1,0 +1,3 @@
+# built artifacts (not committed)
+files/usr/bin/corplink-rs
+*.tar.gz

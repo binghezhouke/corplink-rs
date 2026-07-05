@@ -1,0 +1,41 @@
+config corplink 'main'
+	# master on/off switch for the service
+	option enabled '0'
+
+	# --- credentials / login ---
+	option company_name ''
+	option username ''
+	option password ''
+	# feilian | feilian_v1 | ldap | lark | OIDC | weixin | dingtalk
+	option platform 'feilian'
+	# optional explicit portal address (leave empty to auto-resolve from company_name)
+	option server ''
+
+	# --- tunnel / gateway ---
+	# TUN interface name corplink-rs creates
+	option interface_name 'corplink'
+	# full = route ALL traffic through the tunnel (global gateway); split = intranet only
+	option route_mode 'full'
+	# auto-add an fw4 masquerade zone + lan->corplink forwarding (needed for a LAN gateway)
+	option masquerade '1'
+	# info | debug  (debug surfaces verbose diagnostics in the Log tab)
+	option log_level 'info'
+
+	# --- advanced (leave empty unless needed) ---
+	# override WireGuard transport: udp | tcp
+	option force_protocol ''
+	# skip the pre-connect gateway ping (for networks that firewall the api port)
+	option skip_ping '0'
+	# pick a specific gateway by name
+	option vpn_server_name ''
+	# override the gateway IP handed out by the portal
+	option vpn_server_ip ''
+	# Install EXACTLY these routes (CIDRs) instead of the server-derived ones,
+	# decoupled from the WireGuard AllowedIPs. Pair with route_mode 'full'.
+	# Repeat the line for multiple entries, e.g.:
+	#   list vpn_route_override '10.0.0.0/8'
+	#   list vpn_route_override '172.16.0.0/12'
+	# CIDRs to carve OUT of the tunnel routes (never sent through the VPN):
+	#   list vpn_disallowed_routes '192.168.2.0/24'
+	# let corplink-rs manage DNS by renaming /etc/resolv.conf (off: keep OpenWrt's resolver)
+	option use_vpn_dns '0'
