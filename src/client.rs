@@ -693,14 +693,20 @@ impl Client {
             let latency = match self.ping_vpn(vpn.ip.clone(), vpn.api_port).await {
                 Ok(latency) => latency,
                 Err(err) => {
-                    log::warn!("failed to ping {}:{}: {}", vpn.ip, vpn.api_port, err);
+                    log::warn!(
+                        "failed to ping {} ({}:{}): {:#}",
+                        vpn.display_name(),
+                        vpn.ip,
+                        vpn.api_port,
+                        err
+                    );
                     -1
                 }
             };
 
             log::info!(
                 "server name {}{}",
-                vpn.en_name,
+                vpn.display_name(),
                 match latency {
                     -1 => " timeout".to_string(),
                     _ => format!(", latency {}ms", latency),
@@ -719,7 +725,13 @@ impl Client {
             let latency = match self.ping_vpn(vpn.ip.clone(), vpn.api_port).await {
                 Ok(latency) => latency,
                 Err(err) => {
-                    log::warn!("failed to ping {}:{}: {}", vpn.ip, vpn.api_port, err);
+                    log::warn!(
+                        "failed to ping {} ({}:{}): {:#}",
+                        vpn.display_name(),
+                        vpn.ip,
+                        vpn.api_port,
+                        err
+                    );
                     -1
                 }
             };
@@ -840,15 +852,21 @@ impl Client {
             vpn_info.len(),
             vpn_info
                 .iter()
-                .map(|i| i.en_name.clone())
+                .map(|i| format!(
+                    "{} ({}:{} {})",
+                    i.display_name(),
+                    i.ip,
+                    i.vpn_port,
+                    i.protocol_mode_str()
+                ))
                 .collect::<Vec<String>>()
         );
         let filtered_vpn = vpn_info
             .into_iter()
             .filter(|vpn| {
                 if let Some(server_name) = self.conf.vpn_server_name.clone() {
-                    if vpn.en_name != server_name {
-                        log::info!("skip {}, expect {}", vpn.en_name, server_name);
+                    if !vpn.matches_name(&server_name) {
+                        log::info!("skip {}, expect {}", vpn.display_name(), server_name);
                         return false;
                     }
                 }
@@ -866,7 +884,7 @@ impl Client {
                     _ => {
                         log::info!(
                             "server name {} is not support {} wg for now",
-                            vpn.en_name,
+                            vpn.display_name(),
                             mode
                         );
                         false
@@ -886,10 +904,32 @@ impl Client {
 
         let vpn = match vpn {
             Some(ref vpn) => vpn,
-            None => bail!("no vpn available"),
+            None => bail!(
+                "no vpn available: every gateway failed to ping (see 'failed to ping' warnings \
+                 above). the ping uses the api port over http; if a gateway you expect is \
+                 reachable, its api port may be blocked from this host/network"
+            ),
         };
         let vpn_addr = format!("{}:{}", vpn.ip, vpn.vpn_port);
-        log::info!("try connect to {}, address {}", vpn.en_name, vpn_addr);
+        let chosen_protocol = match self.conf.force_protocol.as_deref() {
+            Some(p) if p.eq_ignore_ascii_case("udp") => "udp (forced)",
+            Some(p) if p.eq_ignore_ascii_case("tcp") => "tcp (forced)",
+            Some(other) => {
+                log::warn!(
+                    "ignoring unknown force_protocol {:?} (expected \"udp\" or \"tcp\"), \
+                     following server protocol_mode",
+                    other
+                );
+                vpn.protocol_mode_str()
+            }
+            None => vpn.protocol_mode_str(),
+        };
+        log::info!(
+            "try connect to {}, address {}, wg transport {}",
+            vpn.display_name(),
+            vpn_addr,
+            chosen_protocol
+        );
 
         let key = self
             .conf
