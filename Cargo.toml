@@ -5,14 +5,23 @@ edition = "2021"
 
 [dependencies]
 regex = "1.10"
-reqwest = { version = "0.11", features = [
+# default-features disabled to drop the native-tls/OpenSSL backend (a C dep that
+# would otherwise be dynamically linked). rustls-tls is pure Rust, so the binary
+# links no system TLS library. trust-dns swaps the resolver from libc's
+# getaddrinfo to a pure-Rust one: a statically-linked glibc binary otherwise
+# dlopen()s libnss_*.so at runtime for DNS, which breaks when the binary is
+# copied to a host with a different glibc. With trust-dns the static binary
+# resolves names itself and is portable across distros.
+reqwest = { version = "0.11", default-features = false, features = [
     "json",
     "gzip",
     "deflate",
     "cookies",
+    "rustls-tls",
+    "trust-dns",
 ] }
 # for debug
-# reqwest = { version = "0.11", features = ["json", "gzip", "deflate", "cookies", "socks"] }
+# reqwest = { version = "0.11", default-features = false, features = ["json", "gzip", "deflate", "cookies", "rustls-tls", "trust-dns", "socks"] }
 tokio = { version = "1.37", features = ["full"] }
 futures = "0.3"
 serde_json = "1.0"
